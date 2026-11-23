@@ -1,0 +1,5 @@
+*.pose
+*.bin
+*.log
+*.tmp
+__pycache__/

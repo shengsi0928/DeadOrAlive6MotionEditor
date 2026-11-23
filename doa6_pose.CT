@@ -1,0 +1,1597 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CheatTable CheatEngineTableVersion="45">
+  <CheatEntries>
+    <CheatEntry>
+      <ID>1</ID>
+      <Description>"1. 启用 DOA6 姿态修改器（勾选后自动弹出面板）"</Description>
+      <Color>0000FF</Color>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript><![CDATA[
+[ENABLE]
+aobscanmodule(DOA6_UpdateParts,DOA6.exe,?? ?? ?? ?? ?? 55 56 57 41 54 41 55 41 56 41 57 48 81 EC 80 00 00 00 44 8B 69 14 48 8B EA 48 8B)
+alloc(newmem,4096,DOA6_UpdateParts)
+alloc(g_poseData,65536,DOA6_UpdateParts)
+
+label(code)
+label(return)
+label(hook_done)
+label(claim_p1)
+label(claim_p2)
+label(is_p1)
+label(is_p2)
+label(run_slot)
+label(saved_ready)
+label(do_restore)
+label(not_frozen)
+label(after_freeze)
+label(delta_ready)
+label(bone_loop)
+label(check_pos)
+label(next_bone)
+label(sync_children)
+label(child_loop)
+label(next_child)
+label(compose_bone)
+
+// g_poseData header (64KB total; alloc zeroes the rest)
+// +0x0000: header
+// +0x0100: P1 deltas (256 * 32 = 0x2000)
+// +0x2100: P2 deltas (256 * 32 = 0x2000)
+// +0x4100: P1 savedPose (256 * 48 = 0x3000)
+// +0x7100: P2 savedPose (256 * 48 = 0x3000)
+g_poseData:
+  dd 1          // +0x00 global_enable = 1
+  dd 0          // +0x04 call_counter
+  dq 0          // +0x08 p1_skel
+  dq 0          // +0x10 p2_skel
+  dd 0          // +0x18 p1_last_seen
+  dd 0          // +0x1C p2_last_seen
+  dd 0          // +0x20 p1_bone_count
+  dd 0          // +0x24 p2_bone_count
+  dd 0          // +0x28 p1_freeze
+  dd 0          // +0x2C p2_freeze
+  dd 0          // +0x30 p1_captured
+  dd 0          // +0x34 p2_captured
+  dd 1          // +0x38 p1_enable
+  dd 1          // +0x3C p2_enable
+  dq 0          // +0x40 p1_lp
+  dq 0          // +0x48 p2_lp
+
+newmem:
+  pushfq
+  push rax
+  push rbx
+  push rcx
+  push rdx
+  push rsi
+  push rdi
+  push r8
+  push r9
+  push r10
+  push r11
+  push r12
+  push r13
+  push r14
+  push r15
+  push rbp
+  sub rsp, 0D0
+  movups [rsp], xmm0
+  movups [rsp+10], xmm1
+  movups [rsp+20], xmm2
+  movups [rsp+30], xmm3
+  movups [rsp+40], xmm4
+  movups [rsp+50], xmm5
+  movups [rsp+60], xmm6
+  movups [rsp+70], xmm7
+
+  mov r14, g_poseData
+  cmp dword ptr [r14], 0
+  je hook_done
+
+  // Validate CharPartMgr (rcx): partCount at +0x14, parts array (stride 0xC0) at +0x38
+  test rcx, rcx
+  je hook_done
+  mov eax, [rcx+14]
+  cmp eax, 1
+  jl hook_done
+  cmp eax, 10
+  jg hook_done
+  mov [rsp+0B8], eax              // partCount
+  mov rdx, [rcx+38]
+  test rdx, rdx
+  je hook_done
+  mov [rsp+0B0], rdx              // parts ptr
+
+  // part[0] -> wrapper -> CModel(+0x20) -> CSkeleton(+0x150)
+  mov rax, [rdx]
+  test rax, rax
+  je hook_done
+  mov rax, [rax+20]
+  test rax, rax
+  je hook_done
+  mov rbp, [rax+150]              // rbp = bodySkel
+  test rbp, rbp
+  je hook_done
+
+  // Validate bodySkel boneCount (80..256)
+  mov rax, [rbp]
+  test rax, rax
+  je hook_done
+  mov rax, [rax]
+  test rax, rax
+  je hook_done
+  movsx r12d, word ptr [rax+04]
+  cmp r12d, 50                    // 80
+  jl hook_done
+  cmp r12d, 100                   // 256
+  jg hook_done
+
+  mov r13, [rbp+10]               // r13 = bodyLp (48 bytes/bone)
+  test r13, r13
+  je hook_done
+
+  // Verify DOA6 body skeleton parent chain:
+  // bone0=-1, bone3=2, bone4=2, bone9=2, bone13=10, bone14=10
+  mov eax, [r13+0C]
+  inc eax
+  jnz hook_done
+  cmp dword ptr [r13+9C], 2
+  jne hook_done
+  cmp dword ptr [r13+0CC], 2
+  jne hook_done
+  cmp dword ptr [r13+1BC], 2
+  jne hook_done
+  cmp dword ptr [r13+27C], 0A
+  jne hook_done
+  cmp dword ptr [r13+2AC], 0A
+  jne hook_done
+
+  // Thread-safe body call counter
+  lock inc dword ptr [r14+04]
+  mov eax, [r14+04]
+
+  // Match or auto-claim P1 / P2 slot by bodySkel (rbp)
+  cmp rbp, [r14+08]
+  je is_p1
+  cmp rbp, [r14+10]
+  je is_p2
+
+  cmp qword ptr [r14+08], 0
+  je claim_p1
+  mov r8d, eax
+  sub r8d, [r14+18]
+  cmp r8d, 8
+  ja claim_p1
+
+  cmp qword ptr [r14+10], 0
+  je claim_p2
+  mov r8d, eax
+  sub r8d, [r14+1C]
+  cmp r8d, 8
+  ja claim_p2
+  jmp hook_done
+
+claim_p1:
+  mov [r14+08], rbp
+  mov dword ptr [r14+30], 0
+  jmp is_p1
+
+claim_p2:
+  mov [r14+10], rbp
+  mov dword ptr [r14+34], 0
+  jmp is_p2
+
+is_p1:
+  mov [r14+18], eax
+  mov [r14+20], r12d
+  mov [r14+40], r13
+  xor r15d, r15d
+  jmp run_slot
+
+is_p2:
+  mov [r14+1C], eax
+  mov [r14+24], r12d
+  mov [r14+48], r13
+  mov r15d, 1
+
+run_slot:
+  // byte size = boneCount * 48 -> rbx
+  mov rbx, r12
+  add rbx, r12
+  add rbx, r12
+  shl rbx, 4
+
+  // slot header base -> r8 (r14 + slot*4)
+  mov r8, r15
+  shl r8, 2
+  add r8, r14
+
+  // savedPose ptr -> r10 (P1: +0x4100, P2: +0x7100)
+  lea r10, [r14+4100]
+  test r15d, r15d
+  je saved_ready
+  lea r10, [r14+7100]
+saved_ready:
+  // Check freeze flag: [r8+28]
+  cmp dword ptr [r8+28], 0
+  je not_frozen
+
+  // Check captured flag: [r8+30]
+  cmp dword ptr [r8+30], 0
+  jne do_restore
+
+  // Capture current local pose -> savedPose
+  cld
+  mov rsi, r13
+  mov rdi, r10
+  mov rcx, rbx
+  rep movsb
+  mov dword ptr [r8+30], 1
+  jmp after_freeze
+
+do_restore:
+  // Restore savedPose -> local pose
+  cld
+  mov rsi, r10
+  mov rdi, r13
+  mov rcx, rbx
+  rep movsb
+  jmp after_freeze
+
+not_frozen:
+  mov dword ptr [r8+30], 0
+
+after_freeze:
+  // Check per-player enable: [r8+38]
+  cmp dword ptr [r8+38], 0
+  je sync_children
+
+  // Deltas ptr -> rdi (P1: +0x0100, P2: +0x2100)
+  lea rdi, [r14+0100]
+  test r15d, r15d
+  je delta_ready
+  lea rdi, [r14+2100]
+delta_ready:
+  mov rsi, r13
+  xor r9d, r9d
+
+bone_loop:
+  cmp r9d, r12d
+  jge sync_children
+
+  mov eax, [rdi+1C]
+  test eax, eax
+  jz next_bone
+
+  // Bit 0: quaternion multiply q' = q * dq
+  test eax, 1
+  jz check_pos
+
+  // ox = qw*dx + qx*dw + qy*dz - qz*dy
+  movss xmm0, [rsi+1C]
+  mulss xmm0, [rdi]
+  movss xmm4, [rsi+10]
+  mulss xmm4, [rdi+0C]
+  addss xmm0, xmm4
+  movss xmm4, [rsi+14]
+  mulss xmm4, [rdi+08]
+  addss xmm0, xmm4
+  movss xmm4, [rsi+18]
+  mulss xmm4, [rdi+04]
+  subss xmm0, xmm4
+
+  // oy = qw*dy - qx*dz + qy*dw + qz*dx
+  movss xmm1, [rsi+1C]
+  mulss xmm1, [rdi+04]
+  movss xmm4, [rsi+10]
+  mulss xmm4, [rdi+08]
+  subss xmm1, xmm4
+  movss xmm4, [rsi+14]
+  mulss xmm4, [rdi+0C]
+  addss xmm1, xmm4
+  movss xmm4, [rsi+18]
+  mulss xmm4, [rdi]
+  addss xmm1, xmm4
+
+  // oz = qw*dz + qx*dy - qy*dx + qz*dw
+  movss xmm2, [rsi+1C]
+  mulss xmm2, [rdi+08]
+  movss xmm4, [rsi+10]
+  mulss xmm4, [rdi+04]
+  addss xmm2, xmm4
+  movss xmm4, [rsi+14]
+  mulss xmm4, [rdi]
+  subss xmm2, xmm4
+  movss xmm4, [rsi+18]
+  mulss xmm4, [rdi+0C]
+  addss xmm2, xmm4
+
+  // ow = qw*dw - qx*dx - qy*dy - qz*dz
+  movss xmm3, [rsi+1C]
+  mulss xmm3, [rdi+0C]
+  movss xmm4, [rsi+10]
+  mulss xmm4, [rdi]
+  subss xmm3, xmm4
+  movss xmm4, [rsi+14]
+  mulss xmm4, [rdi+04]
+  subss xmm3, xmm4
+  movss xmm4, [rsi+18]
+  mulss xmm4, [rdi+08]
+  subss xmm3, xmm4
+
+  movss [rsi+10], xmm0
+  movss [rsi+14], xmm1
+  movss [rsi+18], xmm2
+  movss [rsi+1C], xmm3
+
+check_pos:
+  // Bit 1: position offset pos' = pos + dpos
+  test eax, 2
+  jz next_bone
+  movss xmm0, [rsi+20]
+  addss xmm0, [rdi+10]
+  movss [rsi+20], xmm0
+  movss xmm1, [rsi+24]
+  addss xmm1, [rdi+14]
+  movss [rsi+24], xmm1
+  movss xmm2, [rsi+28]
+  addss xmm2, [rdi+18]
+  movss [rsi+28], xmm2
+
+next_bone:
+  add rsi, 30
+  add rdi, 20
+  inc r9d
+  jmp bone_loop
+
+sync_children:
+  // Only sync Face/Hair if freeze or enable is active for this slot
+  mov eax, [r8+28]
+  or eax, [r8+38]
+  test eax, eax
+  jz hook_done
+  cmp dword ptr [rsp+0B8], 2
+  jl hook_done
+
+  // Initialize acc at [rsp+80] to identity: scale=(1,1,1), quat=(0,0,0,1), pos=(0,0,0)
+  lea rsi, [rsp+80]
+  lea rdx, [rsp+0C0]
+  mov eax, 3F800000
+  mov [rsi], eax
+  mov [rsi+04], eax
+  mov [rsi+08], eax
+  xor ecx, ecx
+  mov [rsi+10], ecx
+  mov [rsi+14], ecx
+  mov [rsi+18], ecx
+  mov [rsi+1C], eax
+  mov [rsi+20], ecx
+  mov [rsi+24], ecx
+  mov [rsi+28], ecx
+
+  // Compose Neck chain: bones 0, 1, 2, 9, 10, 11 (offsets 0, 30, 60, 1B0, 1E0, 210)
+  mov rdi, r13
+  call compose_bone
+  lea rdi, [r13+30]
+  call compose_bone
+  lea rdi, [r13+60]
+  call compose_bone
+  lea rdi, [r13+1B0]
+  call compose_bone
+  lea rdi, [r13+1E0]
+  call compose_bone
+  lea rdi, [r13+210]
+  call compose_bone
+
+  // Copy T_neck -> childLp[1] and bodyLp[12] -> childLp[2] for all parts k = 1..partCount-1
+  mov rbx, [rsp+0B0]
+  add rbx, 0C0                    // start at part[1]
+  mov r9d, 1
+
+child_loop:
+  cmp r9d, [rsp+0B8]
+  jge hook_done
+
+  mov rax, [rbx]
+  test rax, rax
+  jz next_child
+  mov rax, [rax+20]
+  test rax, rax
+  jz next_child
+  mov rcx, [rax+150]              // childSkel
+  test rcx, rcx
+  jz next_child
+  mov rax, [rcx]
+  test rax, rax
+  jz next_child
+  mov rax, [rax]
+  test rax, rax
+  jz next_child
+  movsx eax, word ptr [rax+04]    // childNb
+  cmp eax, 3
+  jl next_child
+
+  mov rdi, [rcx+10]               // childLp
+  test rdi, rdi
+  jz next_child
+
+  // Check childLp[0].par==-1, childLp[1].par==0, childLp[2].par==1
+  mov eax, [rdi+0C]
+  inc eax
+  jnz next_child
+  cmp dword ptr [rdi+3C], 0
+  jne next_child
+  cmp dword ptr [rdi+6C], 1
+  jne next_child
+
+  // Copy acc (T_neck) -> childLp[1] (+30..+5B, preserving parent at +3C)
+  mov eax, [rsi]
+  mov [rdi+30], eax
+  mov eax, [rsi+04]
+  mov [rdi+34], eax
+  mov eax, [rsi+08]
+  mov [rdi+38], eax
+  movups xmm0, [rsi+10]
+  movups [rdi+40], xmm0
+  mov eax, [rsi+20]
+  mov [rdi+50], eax
+  mov eax, [rsi+24]
+  mov [rdi+54], eax
+  mov eax, [rsi+28]
+  mov [rdi+58], eax
+
+  // Copy bodyLp[12] (+240..+26B) -> childLp[2] (+60..+8B, preserving parent at +6C)
+  mov eax, [r13+240]
+  mov [rdi+60], eax
+  mov eax, [r13+244]
+  mov [rdi+64], eax
+  mov eax, [r13+248]
+  mov [rdi+68], eax
+  movups xmm0, [r13+250]
+  movups [rdi+70], xmm0
+  mov eax, [r13+260]
+  mov [rdi+80], eax
+  mov eax, [r13+264]
+  mov [rdi+84], eax
+  mov eax, [r13+268]
+  mov [rdi+88], eax
+
+next_child:
+  add rbx, 0C0
+  inc r9d
+  jmp child_loop
+
+hook_done:
+  movups xmm7, [rsp+70]
+  movups xmm6, [rsp+60]
+  movups xmm5, [rsp+50]
+  movups xmm4, [rsp+40]
+  movups xmm3, [rsp+30]
+  movups xmm2, [rsp+20]
+  movups xmm1, [rsp+10]
+  movups xmm0, [rsp]
+  add rsp, 0D0
+  pop rbp
+  pop r15
+  pop r14
+  pop r13
+  pop r12
+  pop r11
+  pop r10
+  pop r9
+  pop r8
+  pop rdi
+  pop rsi
+  pop rdx
+  pop rcx
+  pop rbx
+  pop rax
+  popfq
+
+code:
+  db 48 89 5C 24 18
+  jmp return
+
+// Helper: compose child bone [rdi] onto acc [rsi], using scratch [rdx]
+compose_bone:
+  // v = acc.scale * c.pos
+  movss xmm0, [rsi]
+  mulss xmm0, [rdi+20]
+  movss xmm1, [rsi+04]
+  mulss xmm1, [rdi+24]
+  movss xmm2, [rsi+08]
+  mulss xmm2, [rdi+28]
+
+  // t = 2 * cross(q.xyz, v) -> xmm3, xmm4, xmm5
+  movss xmm3, [rsi+14]
+  mulss xmm3, xmm2
+  movss xmm6, [rsi+18]
+  mulss xmm6, xmm1
+  subss xmm3, xmm6
+  addss xmm3, xmm3
+
+  movss xmm4, [rsi+18]
+  mulss xmm4, xmm0
+  movss xmm6, [rsi+10]
+  mulss xmm6, xmm2
+  subss xmm4, xmm6
+  addss xmm4, xmm4
+
+  movss xmm5, [rsi+10]
+  mulss xmm5, xmm1
+  movss xmm6, [rsi+14]
+  mulss xmm6, xmm0
+  subss xmm5, xmm6
+  addss xmm5, xmm5
+
+  // v' = v + qw*t + cross(q.xyz, t); acc.pos += v'
+  movss xmm7, [rsi+1C]
+
+  movss xmm6, xmm7
+  mulss xmm6, xmm3
+  addss xmm0, xmm6
+  movss xmm6, [rsi+14]
+  mulss xmm6, xmm5
+  addss xmm0, xmm6
+  movss xmm6, [rsi+18]
+  mulss xmm6, xmm4
+  subss xmm0, xmm6
+  addss xmm0, [rsi+20]
+  movss [rsi+20], xmm0
+
+  movss xmm6, xmm7
+  mulss xmm6, xmm4
+  addss xmm1, xmm6
+  movss xmm6, [rsi+18]
+  mulss xmm6, xmm3
+  addss xmm1, xmm6
+  movss xmm6, [rsi+10]
+  mulss xmm6, xmm5
+  subss xmm1, xmm6
+  addss xmm1, [rsi+24]
+  movss [rsi+24], xmm1
+
+  movss xmm6, xmm7
+  mulss xmm6, xmm5
+  addss xmm2, xmm6
+  movss xmm6, [rsi+10]
+  mulss xmm6, xmm4
+  addss xmm2, xmm6
+  movss xmm6, [rsi+14]
+  mulss xmm6, xmm3
+  subss xmm2, xmm6
+  addss xmm2, [rsi+28]
+  movss [rsi+28], xmm2
+
+  // acc.quat = normalize(acc.quat * c.quat)
+  movss xmm0, [rsi+1C]
+  mulss xmm0, [rdi+10]
+  movss xmm4, [rsi+10]
+  mulss xmm4, [rdi+1C]
+  addss xmm0, xmm4
+  movss xmm4, [rsi+14]
+  mulss xmm4, [rdi+18]
+  addss xmm0, xmm4
+  movss xmm4, [rsi+18]
+  mulss xmm4, [rdi+14]
+  subss xmm0, xmm4
+
+  movss xmm1, [rsi+1C]
+  mulss xmm1, [rdi+14]
+  movss xmm4, [rsi+10]
+  mulss xmm4, [rdi+18]
+  subss xmm1, xmm4
+  movss xmm4, [rsi+14]
+  mulss xmm4, [rdi+1C]
+  addss xmm1, xmm4
+  movss xmm4, [rsi+18]
+  mulss xmm4, [rdi+10]
+  addss xmm1, xmm4
+
+  movss xmm2, [rsi+1C]
+  mulss xmm2, [rdi+18]
+  movss xmm4, [rsi+10]
+  mulss xmm4, [rdi+14]
+  addss xmm2, xmm4
+  movss xmm4, [rsi+14]
+  mulss xmm4, [rdi+10]
+  subss xmm2, xmm4
+  movss xmm4, [rsi+18]
+  mulss xmm4, [rdi+1C]
+  addss xmm2, xmm4
+
+  movss xmm3, [rsi+1C]
+  mulss xmm3, [rdi+1C]
+  movss xmm4, [rsi+10]
+  mulss xmm4, [rdi+10]
+  subss xmm3, xmm4
+  movss xmm4, [rsi+14]
+  mulss xmm4, [rdi+14]
+  subss xmm3, xmm4
+  movss xmm4, [rsi+18]
+  mulss xmm4, [rdi+18]
+  subss xmm3, xmm4
+
+  movaps xmm4, xmm0
+  mulss xmm4, xmm4
+  movaps xmm5, xmm1
+  mulss xmm5, xmm5
+  addss xmm4, xmm5
+  movaps xmm5, xmm2
+  mulss xmm5, xmm5
+  addss xmm4, xmm5
+  movaps xmm5, xmm3
+  mulss xmm5, xmm5
+  addss xmm4, xmm5
+  sqrtss xmm4, xmm4
+  divss xmm0, xmm4
+  divss xmm1, xmm4
+  divss xmm2, xmm4
+  divss xmm3, xmm4
+
+  movss [rsi+10], xmm0
+  movss [rsi+14], xmm1
+  movss [rsi+18], xmm2
+  movss [rsi+1C], xmm3
+
+  // acc.scale *= c.scale
+  movss xmm0, [rsi]
+  mulss xmm0, [rdi]
+  movss [rsi], xmm0
+  movss xmm1, [rsi+04]
+  mulss xmm1, [rdi+04]
+  movss [rsi+04], xmm1
+  movss xmm2, [rsi+08]
+  mulss xmm2, [rdi+08]
+  movss [rsi+08], xmm2
+  ret
+
+DOA6_UpdateParts:
+  jmp newmem
+return:
+
+registersymbol(DOA6_UpdateParts)
+registersymbol(g_poseData)
+
+[DISABLE]
+DOA6_UpdateParts:
+  db 48 89 5C 24 18
+
+unregistersymbol(DOA6_UpdateParts)
+unregistersymbol(g_poseData)
+dealloc(newmem)
+dealloc(g_poseData)
+]]></AssemblerScript>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>2</ID>
+      <Description>"2. 重新打开姿态编辑面板（关闭窗口后可再点此项）"</Description>
+      <Color>008000</Color>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript><![CDATA[
+[ENABLE]
+{$lua}
+if not syntaxcheck then
+  Doa6Pose_WantShow = true
+end
+{$asm}
+[DISABLE]
+]]></AssemblerScript>
+    </CheatEntry>
+  </CheatEntries>
+  <UserdefinedSymbols/>
+  <LuaScript><![CDATA[
+-- ============================================================================
+-- DOA6 角色姿态修改器 (Hook: DOA6_UpdateParts @ DOA6.exe+0x405C40)
+-- 全部 GUI 与定时器均运行在 CE 主线程，带可视化人体关节交互面板
+-- ============================================================================
+
+local MAX_BONES = 256
+local DELTA_BASE = { [0] = 0x0100, [1] = 0x2100 }
+local UI_VERSION = 2
+
+local BONE_LIST = {
+  { id = 1,  name = "1  整体位置/高度 (Root)" },
+  { id = 2,  name = "2  骨盆 / 全身旋转 (Pelvis)" },
+  { id = 9,  name = "9  腰部 / 下脊柱 (Waist)" },
+  { id = 10, name = "10 胸部 / 上脊柱 (Chest)" },
+  { id = 11, name = "11 颈部 (Neck)" },
+  { id = 12, name = "12 头部 (Head)" },
+  { id = 13, name = "13 左锁骨 / 左肩 (L Clavicle)" },
+  { id = 15, name = "15 左上臂 (L UpperArm)" },
+  { id = 17, name = "17 左前臂 / 左肘 (L Forearm)" },
+  { id = 19, name = "19 左手腕 (L Hand)" },
+  { id = 14, name = "14 右锁骨 / 右肩 (R Clavicle)" },
+  { id = 16, name = "16 右上臂 (R UpperArm)" },
+  { id = 18, name = "18 右前臂 / 右肘 (R Forearm)" },
+  { id = 20, name = "20 右手腕 (R Hand)" },
+  { id = 3,  name = "3  左大腿 / 左髋 (L Thigh)" },
+  { id = 5,  name = "5  左小腿 / 左膝 (L Knee)" },
+  { id = 7,  name = "7  左脚踝 (L Foot)" },
+  { id = 23, name = "23 左脚趾 (L Toe)" },
+  { id = 4,  name = "4  右大腿 / 右髋 (R Thigh)" },
+  { id = 6,  name = "6  右小腿 / 右膝 (R Knee)" },
+  { id = 8,  name = "8  右脚踝 (R Foot)" },
+  { id = 24, name = "24 右脚趾 (R Toe)" },
+  { id = 26, name = "26 左拇指1" },
+  { id = 28, name = "28 左食指1" },
+  { id = 30, name = "30 左中指1" },
+  { id = 40, name = "40 左无名指1" },
+  { id = 42, name = "42 左小指1" },
+  { id = 27, name = "27 右拇指1" },
+  { id = 29, name = "29 右食指1" },
+  { id = 31, name = "31 右中指1" },
+  { id = 41, name = "41 右无名指1" },
+  { id = 43, name = "43 右小指1" },
+}
+
+local BONE_NAME_BY_ID = {}
+local BONE_INDEX_BY_ID = {}
+for i, b in ipairs(BONE_LIST) do
+  BONE_NAME_BY_ID[b.id] = b.name
+  BONE_INDEX_BY_ID[b.id] = i - 1
+end
+
+-- Left <-> Right mirror pairs
+local MIRROR_PAIR = {
+  [13]=14, [14]=13, [15]=16, [16]=15, [17]=18, [18]=17, [19]=20, [20]=19,
+  [3]=4,   [4]=3,   [5]=6,   [6]=5,   [7]=8,   [8]=7,   [23]=24, [24]=23,
+  [26]=27, [27]=26, [28]=29, [29]=28, [30]=31, [31]=30, [40]=41, [41]=40, [42]=43, [43]=42,
+}
+
+-- Human mannequin clickable joint nodes (front view, 260x518 canvas; character's Left is on right side)
+local BODY_NODES = {
+  { id = 12, x = 130, y = 58,  r = 10, short = "头" },
+  { id = 11, x = 130, y = 98,  r = 7,  short = "颈" },
+  { id = 10, x = 130, y = 148, r = 9,  short = "胸" },
+  { id = 9,  x = 130, y = 198, r = 9,  short = "腰" },
+  { id = 2,  x = 130, y = 248, r = 10, short = "骨盆" },
+  { id = 1,  x = 130, y = 478, r = 9,  short = "整体", isRoot = true },
+
+  -- Character Left arm (right side of front-view diagram)
+  { id = 13, x = 164, y = 122, r = 7,  short = "左肩" },
+  { id = 15, x = 198, y = 144, r = 8,  short = "左上臂" },
+  { id = 17, x = 216, y = 210, r = 8,  short = "左肘" },
+  { id = 19, x = 228, y = 276, r = 8,  short = "左手" },
+
+  -- Character Right arm (left side of front-view diagram)
+  { id = 14, x = 96,  y = 122, r = 7,  short = "右肩" },
+  { id = 16, x = 62,  y = 144, r = 8,  short = "右上臂" },
+  { id = 18, x = 44,  y = 210, r = 8,  short = "右肘" },
+  { id = 20, x = 32,  y = 276, r = 8,  short = "右手" },
+
+  -- Character Left leg (right side)
+  { id = 3,  x = 162, y = 268, r = 9,  short = "左大腿" },
+  { id = 5,  x = 168, y = 352, r = 8,  short = "左膝" },
+  { id = 7,  x = 172, y = 432, r = 8,  short = "左踝" },
+  { id = 23, x = 204, y = 450, r = 7,  short = "左趾" },
+
+  -- Character Right leg (left side)
+  { id = 4,  x = 98,  y = 268, r = 9,  short = "右大腿" },
+  { id = 6,  x = 92,  y = 352, r = 8,  short = "右膝" },
+  { id = 8,  x = 88,  y = 432, r = 8,  short = "右踝" },
+  { id = 24, x = 56,  y = 450, r = 7,  short = "右趾" },
+}
+
+local NODE_BY_ID = {}
+for _, n in ipairs(BODY_NODES) do NODE_BY_ID[n.id] = n end
+
+local BODY_LINKS = {
+  {12, 11}, {11, 10}, {10, 9}, {9, 2},
+  {10, 13}, {13, 15}, {15, 17}, {17, 19},
+  {10, 14}, {14, 16}, {16, 18}, {18, 20},
+  {2, 3}, {3, 5}, {5, 7}, {7, 23},
+  {2, 4}, {4, 6}, {6, 8}, {8, 24},
+}
+
+Doa6Pose_WantShow = false
+
+-- Preserve saved poses across table reloads, upgrade UI cleanly if version changed
+if Doa6Pose and Doa6Pose.ui and Doa6Pose.ui.uiVersion ~= UI_VERSION then
+  if Doa6Pose.ui.form then pcall(function() Doa6Pose.ui.form.hide() end) end
+  Doa6Pose.ui = nil
+end
+
+Doa6Pose = Doa6Pose or {
+  slot = 0,
+  bone = 15,
+  hoverBone = nil,
+  state = { [0] = {}, [1] = {} },
+  ui = nil,
+  updating = false,
+  hookActive = false,
+  lastBase = nil,
+  watchTimer = nil,
+  hkF6 = nil,
+  hkF8 = nil,
+  hkF9 = nil,
+}
+
+local function safeRun(tag, fn)
+  local ok, err = pcall(fn)
+  if not ok then
+    print("[doa6_pose " .. tag .. " ERROR] " .. tostring(err))
+  end
+end
+
+local function getBase()
+  local a = getAddressSafe("g_poseData")
+  if a and a ~= 0 then return a end
+  return nil
+end
+
+-- Rotation vector (Exponential Map in degrees) -> unit quaternion (x, y, z, w)
+-- Eliminates Euler gimbal lock at Y = ±90° (where XYZ Euler makes X and Z rotate the same axis)
+local function eulerToQuat(rxDeg, ryDeg, rzDeg)
+  local len = math.sqrt(rxDeg * rxDeg + ryDeg * ryDeg + rzDeg * rzDeg)
+  if len < 1e-5 then
+    return 0, 0, 0, 1
+  end
+  local halfRad = len * (math.pi / 360.0)
+  local s = math.sin(halfRad) / len
+  return rxDeg * s, ryDeg * s, rzDeg * s, math.cos(halfRad)
+end
+
+local function getBoneState(slot, boneId)
+  local s = Doa6Pose.state[slot][boneId]
+  if not s then
+    s = { rx = 0, ry = 0, rz = 0, px = 0, py = 0, pz = 0 }
+    Doa6Pose.state[slot][boneId] = s
+  end
+  return s
+end
+
+local function isBoneModified(slot, boneId)
+  local s = Doa6Pose.state[slot][boneId]
+  if not s then return false end
+  return math.abs(s.rx) > 1e-4 or math.abs(s.ry) > 1e-4 or math.abs(s.rz) > 1e-4
+      or math.abs(s.px) > 1e-4 or math.abs(s.py) > 1e-4 or math.abs(s.pz) > 1e-4
+end
+
+local function repaintBody()
+  local ui = Doa6Pose.ui
+  if ui and ui.pbBody then
+    pcall(function() ui.pbBody.repaint() end)
+  end
+end
+
+local function writeBoneToMem(slot, boneId)
+  local base = getBase()
+  if not base then return end
+  if boneId < 0 or boneId >= MAX_BONES then return end
+  local s = getBoneState(slot, boneId)
+  local addr = base + DELTA_BASE[slot] + boneId * 32
+  local flags = 0
+  if math.abs(s.rx) > 1e-4 or math.abs(s.ry) > 1e-4 or math.abs(s.rz) > 1e-4 then
+    local qx, qy, qz, qw = eulerToQuat(s.rx, s.ry, s.rz)
+    writeFloat(addr + 0x00, qx)
+    writeFloat(addr + 0x04, qy)
+    writeFloat(addr + 0x08, qz)
+    writeFloat(addr + 0x0C, qw)
+    flags = flags + 1
+  else
+    writeFloat(addr + 0x00, 0)
+    writeFloat(addr + 0x04, 0)
+    writeFloat(addr + 0x08, 0)
+    writeFloat(addr + 0x0C, 1)
+  end
+  if math.abs(s.px) > 1e-4 or math.abs(s.py) > 1e-4 or math.abs(s.pz) > 1e-4 then
+    writeFloat(addr + 0x10, s.px)
+    writeFloat(addr + 0x14, s.py)
+    writeFloat(addr + 0x18, s.pz)
+    flags = flags + 2
+  else
+    writeFloat(addr + 0x10, 0)
+    writeFloat(addr + 0x14, 0)
+    writeFloat(addr + 0x18, 0)
+  end
+  writeInteger(addr + 0x1C, flags)
+end
+
+local function flushAllToMem()
+  local base = getBase()
+  if not base then return end
+  for slot = 0, 1 do
+    local dbase = base + DELTA_BASE[slot]
+    for i = 0, MAX_BONES - 1 do
+      writeInteger(dbase + i * 32 + 0x1C, 0)
+    end
+    for boneId, _ in pairs(Doa6Pose.state[slot]) do
+      writeBoneToMem(slot, boneId)
+    end
+  end
+end
+
+local function setFreeze(slot, on)
+  local base = getBase()
+  if not base then return end
+  writeInteger(base + 0x28 + slot * 4, on and 1 or 0)
+  if on then
+    writeInteger(base + 0x30 + slot * 4, 0)
+  end
+end
+
+local function recapture(slot)
+  local base = getBase()
+  if not base then return end
+  writeInteger(base + 0x30 + slot * 4, 0)
+  beep()
+end
+
+local function setEnable(slot, on)
+  local base = getBase()
+  if not base then return end
+  writeInteger(base + 0x38 + slot * 4, on and 1 or 0)
+end
+
+local function syncUIFromState()
+  local ui = Doa6Pose.ui
+  if not ui or not ui.form or not ui.tbRX then return end
+  Doa6Pose.updating = true
+  local s = getBoneState(Doa6Pose.slot, Doa6Pose.bone)
+  local rx = math.floor(s.rx + 0.5)
+  local ry = math.floor(s.ry + 0.5)
+  local rz = math.floor(s.rz + 0.5)
+  local px = math.floor(s.px + 0.5)
+  local py = math.floor(s.py + 0.5)
+  local pz = math.floor(s.pz + 0.5)
+
+  ui.tbRX.Position = rx
+  ui.tbRY.Position = ry
+  ui.tbRZ.Position = rz
+  ui.tbPX.Position = px
+  ui.tbPY.Position = py
+  ui.tbPZ.Position = pz
+
+  ui.lblRX.Caption = string.format("X 旋转: %+4d°", rx)
+  ui.lblRY.Caption = string.format("Y 旋转: %+4d°", ry)
+  ui.lblRZ.Caption = string.format("Z 旋转: %+4d°", rz)
+  ui.lblPX.Caption = string.format("X 平移: %+4d cm", px)
+  ui.lblPY.Caption = string.format("Y 平移: %+4d cm", py)
+  ui.lblPZ.Caption = string.format("Z 平移: %+4d cm", pz)
+
+  local bname = BONE_NAME_BY_ID[Doa6Pose.bone] or (tostring(Doa6Pose.bone) .. " 自定义骨骼")
+  ui.lblActiveBone.Caption = "当前关节: " .. bname
+  ui.edBoneId.Text = tostring(Doa6Pose.bone)
+  local idx = BONE_INDEX_BY_ID[Doa6Pose.bone]
+  if idx ~= nil then ui.cbBone.ItemIndex = idx end
+  ui.cbSlot.ItemIndex = Doa6Pose.slot
+
+  local base = getBase()
+  if base then
+    ui.cbEnable.Checked = (readInteger(base + 0x38 + Doa6Pose.slot * 4) or 1) ~= 0
+    ui.cbFreeze.Checked = (readInteger(base + 0x28 + Doa6Pose.slot * 4) or 0) ~= 0
+  end
+  Doa6Pose.updating = false
+  repaintBody()
+end
+
+local function updateStatus()
+  local ui = Doa6Pose.ui
+  if not ui or not ui.lblStatus then return end
+  local base = getBase()
+  if not base then
+    ui.lblStatus.Caption = "状态: 钩子未启用"
+    return
+  end
+  local p1 = readQword(base + 0x08) or 0
+  local p2 = readQword(base + 0x10) or 0
+  local n1 = readInteger(base + 0x20) or 0
+  local n2 = readInteger(base + 0x24) or 0
+  local cnt = readInteger(base + 0x04) or 0
+  ui.lblStatus.Caption = string.format(
+    "状态: 运行中 (帧=%d) | P1: %s(%d骨) | P2: %s(%d骨) | 快捷键: F6面板 F8冻结 F9重抓",
+    cnt,
+    p1 ~= 0 and "已锁定" or "等待", n1,
+    p2 ~= 0 and "已锁定" or "等待", n2
+  )
+end
+
+local function hitTestNode(x, y)
+  local bestId, bestD2 = nil, 20 * 20
+  for _, n in ipairs(BODY_NODES) do
+    local dx, dy = x - n.x, y - n.y
+    if n.isRoot then
+      if math.abs(dx) <= 30 and math.abs(dy) <= 13 then
+        return n.id
+      end
+    else
+      local d2 = dx * dx + dy * dy
+      if d2 <= bestD2 then
+        bestD2 = d2
+        bestId = n.id
+      end
+    end
+  end
+  return bestId
+end
+
+local function drawHumanCanvas(pb)
+  local c = pb.Canvas
+  local w, h = pb.Width, pb.Height
+
+  -- Dark slate background (Lazarus TColor is 0xBBGGRR)
+  c.Brush.Color = 0x28201E
+  c.Pen.Color = 0x3F3530
+  c.Pen.Width = 1
+  c.fillRect(0, 0, w, h)
+  c.rect(0, 0, w - 1, h - 1)
+
+  -- Subtle center vertical axis
+  c.Pen.Color = 0x3A312C
+  c.line(130, 26, 130, 466)
+
+  -- Header labels (front view: character's right on left, character's left on right)
+  c.Font.Color = 0xB8A59A
+  c.Font.Size = 8
+  c.textOut(10, 8, "<- 右侧(R)")
+  c.textOut(102, 8, "正面视图")
+  c.textOut(190, 8, "左侧(L) ->")
+
+  -- Stylized human silhouette (soft muted body shapes behind skeleton)
+  c.Brush.Color = 0x433731
+  c.Pen.Color = 0x52453E
+  c.Pen.Width = 1
+  -- Head oval
+  c.ellipse(106, 30, 154, 84)
+  -- Neck
+  c.roundRect(121, 82, 139, 114, 4, 4)
+  -- Upper torso (chest)
+  c.roundRect(96, 112, 164, 180, 22, 22)
+  -- Waist
+  c.roundRect(105, 170, 155, 224, 18, 18)
+  -- Hips / Pelvis
+  c.roundRect(92, 214, 168, 276, 26, 26)
+
+  -- Thick limb silhouettes
+  c.Pen.Color = 0x433731
+  c.Pen.Width = 14
+  c.line(164, 122, 198, 144); c.line(198, 144, 216, 210); c.line(216, 210, 228, 276)
+  c.line(96, 122, 62, 144);   c.line(62, 144, 44, 210);   c.line(44, 210, 32, 276)
+  c.Pen.Width = 18
+  c.line(162, 268, 168, 352); c.line(98, 268, 92, 352)
+  c.Pen.Width = 13
+  c.line(168, 352, 172, 432); c.line(92, 352, 88, 432)
+  c.Pen.Width = 10
+  c.line(172, 432, 204, 450); c.line(88, 432, 56, 450)
+
+  -- Skeleton bone links
+  c.Pen.Color = 0x9B7E6E
+  c.Pen.Width = 2
+  for _, lk in ipairs(BODY_LINKS) do
+    local a, b = NODE_BY_ID[lk[1]], NODE_BY_ID[lk[2]]
+    if a and b then
+      c.line(a.x, a.y, b.x, b.y)
+    end
+  end
+
+  -- Joint nodes
+  for _, n in ipairs(BODY_NODES) do
+    local isSel = (n.id == Doa6Pose.bone)
+    local isHov = (n.id == Doa6Pose.hoverBone)
+    local isMod = isBoneModified(Doa6Pose.slot, n.id)
+    local r = n.r
+
+    if isSel then
+      -- Outer selection glow ring
+      c.Brush.Color = 0x28201E
+      c.Pen.Color = 0xFFFFFF
+      c.Pen.Width = 2
+      c.ellipse(n.x - r - 4, n.y - r - 4, n.x + r + 4, n.y + r + 4)
+      c.Brush.Color = 0x1A9FFF -- bright orange-gold (BGR)
+      c.Pen.Color = 0xFFFFFF
+      c.Pen.Width = 2
+    elseif isMod then
+      c.Brush.Color = 0x71CC2E -- emerald green (BGR)
+      c.Pen.Color = isHov and 0xFFFFFF or 0xC8F0A8
+      c.Pen.Width = isHov and 2 or 1
+    else
+      c.Brush.Color = isHov and 0xFFA054 or 0xA89282
+      c.Pen.Color = isHov and 0xFFFFFF or 0xE6DCD4
+      c.Pen.Width = isHov and 2 or 1
+    end
+
+    if n.isRoot then
+      c.roundRect(n.x - 28, n.y - 10, n.x + 28, n.y + 10, 6, 6)
+      c.Font.Color = isSel and 0x101010 or 0xFFFFFF
+      c.Font.Size = 8
+      c.textOut(n.x - 22, n.y - 7, "整体根骨")
+    else
+      c.ellipse(n.x - r, n.y - r, n.x + r, n.y + r)
+    end
+  end
+
+  -- Hover or Selected tooltip banner near bottom of canvas
+  local tipId = Doa6Pose.hoverBone or Doa6Pose.bone
+  local tipName = BONE_NAME_BY_ID[tipId] or ("骨 " .. tostring(tipId))
+  c.Brush.Color = 0x352B27
+  c.Pen.Color = 0x4E423C
+  c.Pen.Width = 1
+  c.fillRect(8, h - 24, w - 8, h - 4)
+  c.Font.Color = 0x55CCFF
+  c.Font.Size = 8
+  local prefix = Doa6Pose.hoverBone and "悬停: " or "已选: "
+  c.textOut(14, h - 21, prefix .. tipName)
+end
+
+local function savePoseFile()
+  local dlg = createSaveDialog(Doa6Pose.ui.form)
+  dlg.Title = "保存当前角色姿态"
+  dlg.Filter = "DOA6 Pose (*.pose)|*.pose|All Files (*.*)|*.*"
+  dlg.DefaultExt = "pose"
+  if not dlg.Execute() then dlg.destroy() return end
+  local path = dlg.FileName
+  dlg.destroy()
+  local f, err = io.open(path, "w")
+  if not f then showMessage("保存失败: " .. tostring(err)) return end
+  f:write("# DOA6_POSE_V1\n")
+  local slot = Doa6Pose.slot
+  for boneId, s in pairs(Doa6Pose.state[slot]) do
+    if isBoneModified(slot, boneId) then
+      f:write(string.format("%d %.3f %.3f %.3f %.3f %.3f %.3f\n",
+        boneId, s.rx, s.ry, s.rz, s.px, s.py, s.pz))
+    end
+  end
+  f:close()
+  showMessage("已保存姿态到:\n" .. path)
+end
+
+local function loadPoseFile()
+  local dlg = createOpenDialog(Doa6Pose.ui.form)
+  dlg.Title = "加载姿态到当前角色"
+  dlg.Filter = "DOA6 Pose (*.pose)|*.pose|All Files (*.*)|*.*"
+  if not dlg.Execute() then dlg.destroy() return end
+  local path = dlg.FileName
+  dlg.destroy()
+  local f, err = io.open(path, "r")
+  if not f then showMessage("读取失败: " .. tostring(err)) return end
+  local slot = Doa6Pose.slot
+  Doa6Pose.state[slot] = {}
+  for line in f:lines() do
+    local id, rx, ry, rz, px, py, pz = line:match("^(%d+)%s+([%-%d%.]+)%s+([%-%d%.]+)%s+([%-%d%.]+)%s+([%-%d%.]+)%s+([%-%d%.]+)%s+([%-%d%.]+)")
+    if id then
+      Doa6Pose.state[slot][tonumber(id)] = {
+        rx = tonumber(rx), ry = tonumber(ry), rz = tonumber(rz),
+        px = tonumber(px), py = tonumber(py), pz = tonumber(pz),
+      }
+    end
+  end
+  f:close()
+  flushAllToMem()
+  syncUIFromState()
+end
+
+local function buildUI()
+  if Doa6Pose.ui and Doa6Pose.ui.uiVersion == UI_VERSION and Doa6Pose.ui.form and Doa6Pose.ui.tbRX then
+    Doa6Pose.ui.form.show()
+    Doa6Pose.ui.form.bringToFront()
+    syncUIFromState()
+    return
+  end
+
+  local f = createForm(false)
+  f.DoNotSaveInTable = true
+  f.Caption = "DOA6 角色姿态修改器 (点击关节控制 · 布料/碰撞联动)"
+  f.Width = 748
+  f.Height = 585
+  f.centerScreen()
+  pcall(function() f.FormStyle = "fsStayOnTop" end)
+
+  local ui = { form = f, uiVersion = UI_VERSION }
+  Doa6Pose.ui = ui
+  Doa6Pose.updating = true
+
+  -- Top status bar
+  local lblStatus = createLabel(f)
+  lblStatus.Left = 12; lblStatus.Top = 8; lblStatus.Width = 724
+  lblStatus.Caption = "状态: 等待游戏帧..."
+  ui.lblStatus = lblStatus
+
+  -- ================= LEFT: Interactive Human Body Panel =================
+  local pnlBody = createPanel(f)
+  pnlBody.Left = 12; pnlBody.Top = 32; pnlBody.Width = 260; pnlBody.Height = 516
+  pnlBody.DoubleBuffered = true
+  ui.pnlBody = pnlBody
+
+  local pb = createPaintBox(pnlBody)
+  pb.Left = 0; pb.Top = 0; pb.Width = 260; pb.Height = 516
+  pb.OnPaint = function(sender)
+    safeRun("PaintBody", function() drawHumanCanvas(sender) end)
+  end
+
+  local function handleBodyClick(x, y, isRight)
+    local hit = hitTestNode(x, y)
+    if not hit then return end
+    if isRight then
+      Doa6Pose.state[Doa6Pose.slot][hit] = { rx=0, ry=0, rz=0, px=0, py=0, pz=0 }
+      writeBoneToMem(Doa6Pose.slot, hit)
+      Doa6Pose.bone = hit
+      syncUIFromState()
+    else
+      Doa6Pose.bone = hit
+      syncUIFromState()
+    end
+  end
+
+  -- Guaranteed left-click handler using documented Control.OnClick + getMousePos + screenToClient
+  pb.OnClick = function()
+    safeRun("BodyClick", function()
+      local mx, my = getMousePos()
+      local cx, cy = pnlBody.screenToClient(mx, my)
+      handleBodyClick(cx, cy, false)
+    end)
+  end
+
+  -- Enhanced mouse down (instant right-click reset) & hover highlight using getMousePos + screenToClient
+  pcall(function()
+    pb.OnMouseDown = function(sender, button)
+      safeRun("BodyMouseDown", function()
+        local mx, my = getMousePos()
+        local cx, cy = pnlBody.screenToClient(mx, my)
+        if button == 1 or button == "mbRight" then
+          handleBodyClick(cx, cy, true)
+        elseif button == 0 or button == "mbLeft" then
+          handleBodyClick(cx, cy, false)
+        end
+      end)
+    end
+    pb.OnMouseMove = function()
+      safeRun("BodyHover", function()
+        local mx, my = getMousePos()
+        local cx, cy = pnlBody.screenToClient(mx, my)
+        local h = hitTestNode(cx, cy)
+        if h ~= Doa6Pose.hoverBone then
+          Doa6Pose.hoverBone = h
+          pb.repaint()
+        end
+      end)
+    end
+  end)
+  ui.pbBody = pb
+
+  local lblLegend = createLabel(f)
+  lblLegend.Left = 12; lblLegend.Top = 554; lblLegend.Width = 260
+  lblLegend.Caption = "左键=选关节  右键=归零  橙=选中  绿=已改"
+
+  -- ================= RIGHT: Joint Sliders & Controls =================
+  local rx0 = 286
+  local y = 32
+
+  -- Row 1: Character slot + Enable
+  local lblSlot = createLabel(f)
+  lblSlot.Caption = "角色:"; lblSlot.Left = rx0; lblSlot.Top = y + 4
+
+  local cbSlot = createComboBox(f)
+  cbSlot.Left = rx0 + 40; cbSlot.Top = y; cbSlot.Width = 95
+  cbSlot.Items.add("角色 P1")
+  cbSlot.Items.add("角色 P2")
+  cbSlot.ItemIndex = Doa6Pose.slot
+  cbSlot.OnChange = function()
+    if Doa6Pose.updating then return end
+    safeRun("SlotChange", function()
+      if cbSlot.ItemIndex >= 0 then
+        Doa6Pose.slot = cbSlot.ItemIndex
+        syncUIFromState()
+      end
+    end)
+  end
+  ui.cbSlot = cbSlot
+
+  local cbEnable = createCheckBox(f)
+  cbEnable.Caption = "启用修改"; cbEnable.Left = rx0 + 148; cbEnable.Top = y + 2; cbEnable.Checked = true
+  cbEnable.OnChange = function()
+    if Doa6Pose.updating then return end
+    safeRun("EnableChange", function() setEnable(Doa6Pose.slot, cbEnable.Checked) end)
+  end
+  ui.cbEnable = cbEnable
+
+  local cbFreeze = createCheckBox(f)
+  cbFreeze.Caption = "冻结动画(F8)"; cbFreeze.Left = rx0 + 245; cbFreeze.Top = y + 2; cbFreeze.Checked = false
+  cbFreeze.OnChange = function()
+    if Doa6Pose.updating then return end
+    safeRun("FreezeChange", function() setFreeze(Doa6Pose.slot, cbFreeze.Checked) end)
+  end
+  ui.cbFreeze = cbFreeze
+  y = y + 32
+
+  -- Row 2: Recapture & Relock
+  local btnRecap = createButton(f)
+  btnRecap.Caption = "重新捕获当前帧 (F9)"; btnRecap.Left = rx0; btnRecap.Top = y; btnRecap.Width = 210; btnRecap.Height = 26
+  btnRecap.OnClick = function()
+    safeRun("Recap", function()
+      setFreeze(Doa6Pose.slot, true)
+      recapture(Doa6Pose.slot)
+      syncUIFromState()
+    end)
+  end
+
+  local btnRelock = createButton(f)
+  btnRelock.Caption = "重新识别 P1/P2"; btnRelock.Left = rx0 + 220; btnRelock.Top = y; btnRelock.Width = 212; btnRelock.Height = 26
+  btnRelock.OnClick = function()
+    safeRun("Relock", function()
+      local base = getBase()
+      if base then
+        writeQword(base + 0x08, 0)
+        writeQword(base + 0x10, 0)
+        writeInteger(base + 0x30, 0)
+        writeInteger(base + 0x34, 0)
+      end
+    end)
+  end
+  y = y + 36
+
+  -- Row 3: Active bone title
+  local lblActiveBone = createLabel(f)
+  lblActiveBone.Left = rx0; lblActiveBone.Top = y; lblActiveBone.Width = 432
+  pcall(function() lblActiveBone.Font.Size = 10; lblActiveBone.Font.Color = 0xAA4400 end)
+  lblActiveBone.Caption = "当前关节: 15 左上臂 (L UpperArm)"
+  ui.lblActiveBone = lblActiveBone
+  y = y + 24
+
+  -- Row 4: Full bone list dropdown (including fingers) + manual bone ID
+  local cbBone = createComboBox(f)
+  cbBone.Left = rx0; cbBone.Top = y; cbBone.Width = 315
+  local selIdx = 0
+  for i, b in ipairs(BONE_LIST) do
+    cbBone.Items.add(b.name)
+    if b.id == Doa6Pose.bone then selIdx = i - 1 end
+  end
+  cbBone.ItemIndex = selIdx
+  cbBone.OnChange = function()
+    if Doa6Pose.updating then return end
+    safeRun("BoneChange", function()
+      local idx = cbBone.ItemIndex
+      if idx >= 0 and BONE_LIST[idx + 1] then
+        Doa6Pose.bone = BONE_LIST[idx + 1].id
+        syncUIFromState()
+      end
+    end)
+  end
+  ui.cbBone = cbBone
+
+  local edBoneId = createEdit(f)
+  edBoneId.Left = rx0 + 324; edBoneId.Top = y; edBoneId.Width = 52; edBoneId.Text = tostring(Doa6Pose.bone)
+  ui.edBoneId = edBoneId
+
+  local btnGoBone = createButton(f)
+  btnGoBone.Caption = "跳转"; btnGoBone.Left = rx0 + 382; btnGoBone.Top = y - 1; btnGoBone.Width = 50; btnGoBone.Height = 24
+  btnGoBone.OnClick = function()
+    safeRun("GoBone", function()
+      local n = tonumber(edBoneId.Text)
+      if n and n >= 0 and n < MAX_BONES then
+        Doa6Pose.bone = math.floor(n)
+        syncUIFromState()
+      end
+    end)
+  end
+  y = y + 36
+
+  -- Helper to add a slider row (with optional step buttons for rotation)
+  local function addSlider(labelPrefix, unit, minV, maxV, fieldKey, withSteps)
+    local lbl = createLabel(f)
+    lbl.Left = rx0; lbl.Top = y + 4; lbl.Width = 108
+    lbl.Caption = string.format("%s:   +0%s", labelPrefix, unit)
+
+    local tb = createTrackBar(f)
+    tb.Left = rx0 + 110; tb.Top = y; tb.Width = withSteps and 178 or 272; tb.Height = 28
+    tb.Min = minV; tb.Max = maxV; tb.Position = 0
+
+    local function applyVal(v)
+      if v < minV then v = minV end
+      if v > maxV then v = maxV end
+      lbl.Caption = string.format("%s: %+4d%s", labelPrefix, v, unit)
+      if Doa6Pose.updating then return end
+      local s = getBoneState(Doa6Pose.slot, Doa6Pose.bone)
+      s[fieldKey] = v
+      writeBoneToMem(Doa6Pose.slot, Doa6Pose.bone)
+      repaintBody()
+    end
+
+    if withSteps then
+      local function addStepBtn(cap, bx, delta)
+        local btn = createButton(f)
+        btn.Caption = cap; btn.Left = bx; btn.Top = y + 2; btn.Width = 30; btn.Height = 24
+        btn.OnClick = function()
+          safeRun("Step", function()
+            local nv = tb.Position + delta
+            if nv < minV then nv = minV end
+            if nv > maxV then nv = maxV end
+            tb.Position = nv
+            applyVal(nv)
+          end)
+        end
+      end
+      addStepBtn("-15", rx0 + 292, -15)
+      addStepBtn("-5",  rx0 + 324, -5)
+      addStepBtn("+5",  rx0 + 356, 5)
+      addStepBtn("+15", rx0 + 388, 15)
+    end
+
+    local btnZero = createButton(f)
+    btnZero.Caption = "0"
+    btnZero.Left = withSteps and (rx0 + 420) or (rx0 + 390)
+    btnZero.Top = y + 2
+    btnZero.Width = withSteps and 24 or 42
+    btnZero.Height = 24
+
+    tb.OnChange = function() safeRun("Slide", function() applyVal(tb.Position) end) end
+    btnZero.OnClick = function() safeRun("Zero", function() tb.Position = 0; applyVal(0) end) end
+
+    y = y + 36
+    return lbl, tb
+  end
+
+  ui.lblRX, ui.tbRX = addSlider("X 旋转", "°", -180, 180, "rx", true)
+  ui.lblRY, ui.tbRY = addSlider("Y 旋转", "°", -180, 180, "ry", true)
+  ui.lblRZ, ui.tbRZ = addSlider("Z 旋转", "°", -180, 180, "rz", true)
+  y = y + 8
+  ui.lblPX, ui.tbPX = addSlider("X 平移", " cm", -150, 150, "px", false)
+  ui.lblPY, ui.tbPY = addSlider("Y 平移", " cm", -150, 150, "py", false)
+  ui.lblPZ, ui.tbPZ = addSlider("Z 平移", " cm", -150, 150, "pz", false)
+  y = y + 12
+
+  -- Action buttons row 1: Reset current / Mirror to opposite side
+  local btnResetBone = createButton(f)
+  btnResetBone.Caption = "归零当前关节"; btnResetBone.Left = rx0; btnResetBone.Top = y; btnResetBone.Width = 210; btnResetBone.Height = 29
+  btnResetBone.OnClick = function()
+    safeRun("ResetBone", function()
+      Doa6Pose.state[Doa6Pose.slot][Doa6Pose.bone] = { rx=0, ry=0, rz=0, px=0, py=0, pz=0 }
+      writeBoneToMem(Doa6Pose.slot, Doa6Pose.bone)
+      syncUIFromState()
+    end)
+  end
+
+  local btnMirror = createButton(f)
+  btnMirror.Caption = "镜像复制到对侧关节"; btnMirror.Left = rx0 + 220; btnMirror.Top = y; btnMirror.Width = 212; btnMirror.Height = 29
+  btnMirror.OnClick = function()
+    safeRun("Mirror", function()
+      local opp = MIRROR_PAIR[Doa6Pose.bone]
+      if not opp then
+        showMessage("当前选中的是中轴骨骼，没有左右对侧关节")
+        return
+      end
+      local s = getBoneState(Doa6Pose.slot, Doa6Pose.bone)
+      Doa6Pose.state[Doa6Pose.slot][opp] = {
+        rx = -s.rx, ry = -s.ry, rz = s.rz,
+        px = s.px,  py = s.py,  pz = -s.pz,
+      }
+      writeBoneToMem(Doa6Pose.slot, opp)
+      repaintBody()
+    end)
+  end
+  y = y + 36
+
+  -- Action buttons row 2: Reset all / Copy pose to other player
+  local btnResetAll = createButton(f)
+  btnResetAll.Caption = "归零当前角色全部关节"; btnResetAll.Left = rx0; btnResetAll.Top = y; btnResetAll.Width = 210; btnResetAll.Height = 29
+  btnResetAll.OnClick = function()
+    safeRun("ResetAll", function()
+      Doa6Pose.state[Doa6Pose.slot] = {}
+      flushAllToMem()
+      syncUIFromState()
+    end)
+  end
+
+  local btnCopySlot = createButton(f)
+  btnCopySlot.Caption = "复制当前姿势到 P1/P2"; btnCopySlot.Left = rx0 + 220; btnCopySlot.Top = y; btnCopySlot.Width = 212; btnCopySlot.Height = 29
+  btnCopySlot.OnClick = function()
+    safeRun("CopySlot", function()
+      local src = Doa6Pose.slot
+      local dst = 1 - src
+      Doa6Pose.state[dst] = {}
+      for bid, st in pairs(Doa6Pose.state[src]) do
+        Doa6Pose.state[dst][bid] = { rx=st.rx, ry=st.ry, rz=st.rz, px=st.px, py=st.py, pz=st.pz }
+      end
+      flushAllToMem()
+      showMessage(string.format("已将 P%d 姿势复制到 P%d", src + 1, dst + 1))
+    end)
+  end
+  y = y + 36
+
+  -- Action buttons row 3: Save / Load pose
+  local btnSave = createButton(f)
+  btnSave.Caption = "保存姿态到文件..."; btnSave.Left = rx0; btnSave.Top = y; btnSave.Width = 210; btnSave.Height = 29
+  btnSave.OnClick = function() safeRun("Save", savePoseFile) end
+
+  local btnLoad = createButton(f)
+  btnLoad.Caption = "从文件加载姿态..."; btnLoad.Left = rx0 + 220; btnLoad.Top = y; btnLoad.Width = 212; btnLoad.Height = 29
+  btnLoad.OnClick = function() safeRun("Load", loadPoseFile) end
+
+  Doa6Pose.updating = false
+  f.show()
+  f.bringToFront()
+  syncUIFromState()
+end
+
+local function uncheckShowEntry()
+  local al = getAddressList()
+  if not al then return end
+  local mr = al.getMemoryRecordByID(2)
+  if mr and mr.Active then
+    mr.Active = false
+  end
+end
+
+local function registerHotkeys()
+  if Doa6Pose.hkF6 then pcall(function() Doa6Pose.hkF6.destroy() end); Doa6Pose.hkF6 = nil end
+  if Doa6Pose.hkF8 then pcall(function() Doa6Pose.hkF8.destroy() end); Doa6Pose.hkF8 = nil end
+  if Doa6Pose.hkF9 then pcall(function() Doa6Pose.hkF9.destroy() end); Doa6Pose.hkF9 = nil end
+  Doa6Pose.hkF6 = createHotkey(function()
+    safeRun("F6", function()
+      if Doa6Pose.ui and Doa6Pose.ui.form and Doa6Pose.ui.form.Visible then
+        Doa6Pose.ui.form.hide()
+      else
+        buildUI()
+      end
+    end)
+  end, 117) -- VK_F6
+  Doa6Pose.hkF8 = createHotkey(function()
+    safeRun("F8", function()
+      local base = getBase()
+      if not base then return end
+      local cur = (readInteger(base + 0x28 + Doa6Pose.slot * 4) or 0) ~= 0
+      setFreeze(Doa6Pose.slot, not cur)
+      syncUIFromState()
+    end)
+  end, 119) -- VK_F8
+  Doa6Pose.hkF9 = createHotkey(function()
+    safeRun("F9", function()
+      setFreeze(Doa6Pose.slot, true)
+      recapture(Doa6Pose.slot)
+      syncUIFromState()
+    end)
+  end, 120) -- VK_F9
+end
+
+local function clearHotkeys()
+  if Doa6Pose.hkF6 then pcall(function() Doa6Pose.hkF6.destroy() end); Doa6Pose.hkF6 = nil end
+  if Doa6Pose.hkF8 then pcall(function() Doa6Pose.hkF8.destroy() end); Doa6Pose.hkF8 = nil end
+  if Doa6Pose.hkF9 then pcall(function() Doa6Pose.hkF9.destroy() end); Doa6Pose.hkF9 = nil end
+end
+
+local function watchTick()
+  safeRun("Watch", function()
+    local base = getBase()
+    if base then
+      if (not Doa6Pose.hookActive) or (Doa6Pose.lastBase ~= base) then
+        Doa6Pose.hookActive = true
+        Doa6Pose.lastBase = base
+        flushAllToMem()
+        buildUI()
+        registerHotkeys()
+      end
+      if Doa6Pose_WantShow then
+        Doa6Pose_WantShow = false
+        buildUI()
+        uncheckShowEntry()
+      end
+      updateStatus()
+    else
+      if Doa6Pose.hookActive then
+        Doa6Pose.hookActive = false
+        Doa6Pose.lastBase = nil
+        clearHotkeys()
+        if Doa6Pose.ui and Doa6Pose.ui.form then
+          Doa6Pose.ui.form.hide()
+        end
+      end
+      if Doa6Pose_WantShow then
+        Doa6Pose_WantShow = false
+        uncheckShowEntry()
+        showMessage("请先勾选「1. 启用 DOA6 姿态修改器」")
+      end
+    end
+  end)
+end
+
+-- Main-thread watcher timer (reused across table reloads, never destroyed inside OnTimer)
+if not Doa6Pose.watchTimer then
+  Doa6Pose.watchTimer = createTimer(getMainForm(), false)
+end
+Doa6Pose.watchTimer.Interval = 300
+Doa6Pose.watchTimer.OnTimer = watchTick
+Doa6Pose.watchTimer.Enabled = true
+
+print("[doa6_pose] Lua 脚本已加载，请附加 DOA6.exe 后勾选「1. 启用 DOA6 姿态修改器」。")
+]]></LuaScript>
+</CheatTable>
